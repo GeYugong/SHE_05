@@ -4,106 +4,104 @@
 #include "common_def.h"
 #include "soc_osal.h"
 #include "app_init.h"
-#include "ins5699s.h"
 
-#define RTC_TIMER_INDEX          1
-#define RTC_TIMER_PRIO           1
-#define RTC_TIMER_PERIOD_US      1000000
+#define TIMER_TIMERS_NUM            4
+#define TIMER_INDEX                 1
+#define TIMER_PRIO                  1
+#define TIMER_DELAY_INT             5
 
-#define RTC_TASK_PRIO            24
-#define RTC_TASK_STACK_SIZE      0x1000
-#define RTC_TASK_SLEEP_MS        5
+#define TIMER1_DELAY_1000US         1000
+#define TIMER2_DELAY_2000US         2000
+#define TIMER3_DELAY_3000US         3000
+#define TIMER4_DELAY_4000US         4000
 
-static timer_handle_t g_rtc_timer = 0;
-static volatile uint8_t g_rtc_read_flag = 0;
+#define TIMER_MS_2_US               1000
 
-static void rtc_timer_callback(uintptr_t data)
+#define TIMER_TASK_PRIO             24
+#define TIMER_TASK_STACK_SIZE       0x1000
+
+typedef struct timer_info {
+    uint32_t start_time;
+    uint32_t end_time;
+    uint32_t delay_time;
+} timer_info_t;
+
+static uint32_t g_timer_int_count = 0;
+
+static timer_info_t g_timers_info[TIMER_TIMERS_NUM] = {
+    {0, 0, TIMER1_DELAY_1000US},
+    {0, 0, TIMER2_DELAY_2000US},
+    {0, 0, TIMER3_DELAY_3000US},
+    {0, 0, TIMER4_DELAY_4000US}
+};
+
+static void timer_timeout_callback(uintptr_t data)
 {
-    unused(data);
+    uint32_t index = (uint32_t)data;
 
-    g_rtc_read_flag = 1;
-
-    uapi_timer_start(g_rtc_timer,
-                     RTC_TIMER_PERIOD_US,
-                     rtc_timer_callback,
-                     0);
+    g_timers_info[index].end_time = uapi_tcxo_get_ms();
+    g_timer_int_count++;
 }
 
-static void print_rtc_time(ins5699s_time time)
-{
-    osal_printk("RTC Time: 20%02d-%02d-%02d  %02d:%02d:%02d  week=%d\r\n",
-                (int)time.year,
-                (int)time.month,
-                (int)time.day,
-                (int)time.hour,
-                (int)time.min,
-                (int)time.sec,
-                (int)time.week);
-}
-
-static void *rtc_task(const char *arg)
+static void *timer_task(const char *arg)
 {
     unused(arg);
 
-    ins5699s_time set_time = {
-        .sec = 0,
-        .min = 30,
-        .hour = 20,
-        .week = 2,
-        .day = 28,
-        .month = 4,
-        .year = 26
-    };
+    timer_handle_t timer_handle[TIMER_TIMERS_NUM] = {0};
 
     uapi_timer_init();
-    uapi_timer_adapter(RTC_TIMER_INDEX, TIMER_1_IRQN, RTC_TIMER_PRIO);
-    uapi_timer_create(RTC_TIMER_INDEX, &g_rtc_timer);
+    uapi_timer_adapter(TIMER_INDEX, TIMER_1_IRQN, TIMER_PRIO);
 
-    ins5699s_init();
+    for (uint32_t i = 0; i < TIMER_TIMERS_NUM; i++) {
+        uapi_timer_create(TIMER_INDEX, &timer_handle[i]);
 
-    osal_printk("Set INS5699S RTC time...\r\n");
-    ins5699s_SetTime(set_time);
+        g_timers_info[i].start_time = uapi_tcxo_get_ms();
 
-    osal_msleep(200);
+        uapi_timer_start(timer_handle[i],
+                         g_timers_info[i].delay_time,
+                         timer_timeout_callback,
+                         i);
 
-    osal_printk("Start reading INS5699S RTC every 1 second.\r\n");
+        osal_msleep(TIMER_DELAY_INT);
+    }
 
-    uapi_timer_start(g_rtc_timer,
-                     RTC_TIMER_PERIOD_US,
-                     rtc_timer_callback,
-                     0);
+    while (g_timer_int_count < TIMER_TIMERS_NUM) {
+        osal_msleep(TIMER_DELAY_INT);
+    }
 
-    while (1) {
-        if (g_rtc_read_flag) {
-            g_rtc_read_flag = 0;
+    for (uint32_t i = 0; i < TIMER_TIMERS_NUM; i++) {
+        uint32_t real_time = g_timers_info[i].end_time - g_timers_info[i].start_time;
+        uint32_t expect_time = g_timers_info[i].delay_time / TIMER_MS_2_US;
 
-            ins5699s_time now = ins5699s_GetTime();
-            print_rtc_time(now);
-        }
+        uapi_timer_stop(timer_handle[i]);
+        uapi_timer_delete(timer_handle[i]);
 
-        osal_msleep(RTC_TASK_SLEEP_MS);
+        osal_printk("timer[%d]: real time = %dms, delay = %dms\r\n",
+                    (int)i,
+                    (int)real_time,
+                    (int)expect_time);
     }
 
     return NULL;
 }
 
-static void rtc_entry(void)
+static void timer_entry(void)
 {
     osal_task *task_handle = NULL;
 
     osal_kthread_lock();
 
-    task_handle = osal_kthread_create((osal_kthread_handler)rtc_task,
+    task_handle = osal_kthread_create((osal_kthread_handler)timer_task,
                                       0,
-                                      "RtcTask",
-                                      RTC_TASK_STACK_SIZE);
+                                      "TimerTask",
+                                      TIMER_TASK_STACK_SIZE);
 
     if (task_handle != NULL) {
-        osal_kthread_set_priority(task_handle, RTC_TASK_PRIO);
+        osal_kthread_set_priority(task_handle, TIMER_TASK_PRIO);
         osal_kfree(task_handle);
     }
 
     osal_kthread_unlock();
 }
 
-app_run(rtc_entry);
+app_run(timer_entry);
