@@ -5,103 +5,98 @@
 #include "soc_osal.h"
 #include "app_init.h"
 
-#define TIMER_TIMERS_NUM            4
-#define TIMER_INDEX                 1
-#define TIMER_PRIO                  1
-#define TIMER_DELAY_INT             5
+#define CLOCK_TIMER_INDEX          1
+#define CLOCK_TIMER_PRIO           1
+#define CLOCK_TIMER_PERIOD_US      1000000
 
-#define TIMER1_DELAY_1000US         1000
-#define TIMER2_DELAY_2000US         2000
-#define TIMER3_DELAY_3000US         3000
-#define TIMER4_DELAY_4000US         4000
+#define CLOCK_TASK_PRIO            24
+#define CLOCK_TASK_STACK_SIZE      0x1000
+#define CLOCK_TASK_SLEEP_MS        5
 
-#define TIMER_MS_2_US               1000
+static timer_handle_t g_clock_timer = 0;
 
-#define TIMER_TASK_PRIO             24
-#define TIMER_TASK_STACK_SIZE       0x1000
+static volatile uint8_t g_print_flag = 0;
+static volatile uint8_t g_hour = 0;
+static volatile uint8_t g_min = 0;
+static volatile uint8_t g_sec = 0;
 
-typedef struct timer_info {
-    uint32_t start_time;
-    uint32_t end_time;
-    uint32_t delay_time;
-} timer_info_t;
-
-static uint32_t g_timer_int_count = 0;
-
-static timer_info_t g_timers_info[TIMER_TIMERS_NUM] = {
-    {0, 0, TIMER1_DELAY_1000US},
-    {0, 0, TIMER2_DELAY_2000US},
-    {0, 0, TIMER3_DELAY_3000US},
-    {0, 0, TIMER4_DELAY_4000US}
-};
-
-static void timer_timeout_callback(uintptr_t data)
+static void clock_timer_callback(uintptr_t data)
 {
-    uint32_t index = (uint32_t)data;
+    unused(data);
 
-    g_timers_info[index].end_time = uapi_tcxo_get_ms();
-    g_timer_int_count++;
+    g_sec++;
+
+    if (g_sec >= 60) {
+        g_sec = 0;
+        g_min++;
+    }
+
+    if (g_min >= 60) {
+        g_min = 0;
+        g_hour++;
+    }
+
+    if (g_hour >= 24) {
+        g_hour = 0;
+    }
+
+    g_print_flag = 1;
+
+    uapi_timer_start(g_clock_timer,
+                     CLOCK_TIMER_PERIOD_US,
+                     clock_timer_callback,
+                     0);
 }
 
-static void *timer_task(const char *arg)
+static void *clock_timer_task(const char *arg)
 {
     unused(arg);
 
-    timer_handle_t timer_handle[TIMER_TIMERS_NUM] = {0};
-
     uapi_timer_init();
-    uapi_timer_adapter(TIMER_INDEX, TIMER_1_IRQN, TIMER_PRIO);
+    uapi_timer_adapter(CLOCK_TIMER_INDEX, TIMER_1_IRQN, CLOCK_TIMER_PRIO);
+    uapi_timer_create(CLOCK_TIMER_INDEX, &g_clock_timer);
 
-    for (uint32_t i = 0; i < TIMER_TIMERS_NUM; i++) {
-        uapi_timer_create(TIMER_INDEX, &timer_handle[i]);
+    osal_printk("1s clock timer start.\r\n");
+    osal_printk("%02d:%02d:%02d\r\n", g_hour, g_min, g_sec);
 
-        g_timers_info[i].start_time = uapi_tcxo_get_ms();
+    uapi_timer_start(g_clock_timer,
+                     CLOCK_TIMER_PERIOD_US,
+                     clock_timer_callback,
+                     0);
 
-        uapi_timer_start(timer_handle[i],
-                         g_timers_info[i].delay_time,
-                         timer_timeout_callback,
-                         i);
+    while (1) {
+        if (g_print_flag) {
+            g_print_flag = 0;
 
-        osal_msleep(TIMER_DELAY_INT);
-    }
+            osal_printk("%02d:%02d:%02d\r\n",
+                        (int)g_hour,
+                        (int)g_min,
+                        (int)g_sec);
+        }
 
-    while (g_timer_int_count < TIMER_TIMERS_NUM) {
-        osal_msleep(TIMER_DELAY_INT);
-    }
-
-    for (uint32_t i = 0; i < TIMER_TIMERS_NUM; i++) {
-        uint32_t real_time = g_timers_info[i].end_time - g_timers_info[i].start_time;
-        uint32_t expect_time = g_timers_info[i].delay_time / TIMER_MS_2_US;
-
-        uapi_timer_stop(timer_handle[i]);
-        uapi_timer_delete(timer_handle[i]);
-
-        osal_printk("timer[%d]: real time = %dms, delay = %dms\r\n",
-                    (int)i,
-                    (int)real_time,
-                    (int)expect_time);
+        osal_msleep(CLOCK_TASK_SLEEP_MS);
     }
 
     return NULL;
 }
 
-static void timer_entry(void)
+static void clock_timer_entry(void)
 {
     osal_task *task_handle = NULL;
 
     osal_kthread_lock();
 
-    task_handle = osal_kthread_create((osal_kthread_handler)timer_task,
+    task_handle = osal_kthread_create((osal_kthread_handler)clock_timer_task,
                                       0,
-                                      "TimerTask",
-                                      TIMER_TASK_STACK_SIZE);
+                                      "ClockTimerTask",
+                                      CLOCK_TASK_STACK_SIZE);
 
     if (task_handle != NULL) {
-        osal_kthread_set_priority(task_handle, TIMER_TASK_PRIO);
+        osal_kthread_set_priority(task_handle, CLOCK_TASK_PRIO);
         osal_kfree(task_handle);
     }
 
     osal_kthread_unlock();
 }
 
-app_run(timer_entry);
+app_run(clock_timer_entry);
